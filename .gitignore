@@ -1,0 +1,8 @@
+/build*/
+/out/
+/model/*.rknn
+*.ndjson
+/*.nv12
+/*.h264
+/.vscode/
+

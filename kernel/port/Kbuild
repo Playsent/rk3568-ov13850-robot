@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Optional external build against the prepared, matching board kernel.
+obj-m := ov13850_atk.o
+ov13850_atk-y := ov13850.o
+ccflags-y += -DOV13850_ATK_EXTERNAL

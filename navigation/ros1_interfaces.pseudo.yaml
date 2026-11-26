@@ -1,0 +1,46 @@
+# PSEUDOCODE — ROS1 Noetic interface contract
+nodes:
+  inspection_global_planner:
+    subscribes: [/map, /odom, /move_base_simple/goal]
+    publishes: [/inspection/global_path, /inspection/planner_status]
+  inspection_local_planner:
+    subscribes: [/inspection/global_path, /odom, /scan, /camera/depth/points]
+    publishes: [/cmd_vel, /inspection/local_trajectory, /inspection/replan]
+  obstacle_fusion:
+    subscribes: [/scan, /camera/depth/points, /tf, /tf_static]
+    publishes: [/inspection/local_costmap, /inspection/tracked_obstacles]
+  mecanum_base:
+    subscribes: [/cmd_vel]
+    publishes: [/wheel_odom, /imu/data, /battery_state, /diagnostics]
+  inspection_vision:
+    publishes: [/inspection/detections, /inspection/alarm]
+
+frames:
+  tree: map -> odom -> base_link -> {laser, camera_link, camera_depth_optical_frame}
+
+cmd_vel_semantics:
+  linear_x: forward_mps
+  linear_y: left_mps
+  angular_z: counterclockwise_radps
+
+timing:
+  global_planner_hz: 1
+  local_planner_hz: 10
+  command_watchdog_ms: 200
+  lidar_stale_ms: 200
+  depth_stale_ms: 300
+  odom_stale_ms: 100
+
+provisional_vehicle:
+  model: four-wheel X-configuration Mecanum
+  length_m: 0.70
+  width_m: 0.55
+  wheelbase_m: 0.50
+  track_width_m: 0.45
+  wheel_radius_m: 0.10
+  inspection_max_vx_mps: 0.50
+  inspection_max_vy_mps: 0.30
+  inspection_max_wz_radps: 1.05
+  inflation_m: 0.35
+  can_interface: can0
+  can_bitrate: 500000

@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+/* ATK-DLRK3568, Ubuntu 24.04.4 V1.1, 2026-11-05. */
+&ov13850 {
+	compatible = "ovti,ov13850";
+	status = "okay";
+	clocks = <&cru 214>; /* CLK_CIF_OUT, driven at 24 MHz by the driver. */
+	clock-names = "xvclk";
+	power-domains = <&power 8>; /* RK3568_PD_VI */
+	reset-gpios = <&gpio3 14 0>; /* GPIO3_B6, active high */
+	pwdn-gpios = <&gpio4 12 0>; /* GPIO4_B4, active high */
+	pinctrl-names = "rockchip,camera_default";
+	pinctrl-0 = <&cif_clk>;
+	lens-focus = <&vm149c>;
+	rockchip,camera-module-index = <0>;
+	rockchip,camera-module-facing = "back";
+	rockchip,camera-module-name = "ZC-OV13850R2A-V1";
+	rockchip,camera-module-lens-name = "Largan-50064B31";
+};
+
+&ov13850_out {
+	remote-endpoint = <&mipi_in_ucam2>;
+	data-lanes = <1 2 3 4>; /* Board routing. The stock sensor mode uses two. */
+};
+
+&mipi_in_ucam2 {
+	remote-endpoint = <&ov13850_out>;
+	data-lanes = <1 2 3 4>;
+};

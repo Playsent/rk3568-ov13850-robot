@@ -1,0 +1,288 @@
+diff --git a/drivers/media/i2c/ov13850.c b/drivers/media/i2c/ov13850.c
+--- a/drivers/media/i2c/ov13850.c
++++ b/drivers/media/i2c/ov13850.c
+@@ -9,6 +9,8 @@
+  * V0.0X01.0X03 add enum_frame_interval function.
+  * V0.0X01.0X04 add quick stream on/off
+  * V0.0X01.0X05 add function g_mbus_config
++ * ATK-DLRK3568: validate the physical endpoint, retain the stock
++ * two-lane mode tables and use per-sensor revision state.
+  */
+ 
+ #include <linux/clk.h>
+@@ -26,6 +28,7 @@
+ #include <media/media-entity.h>
+ #include <media/v4l2-async.h>
+ #include <media/v4l2-ctrls.h>
++#include <media/v4l2-fwnode.h>
+ #include <media/v4l2-subdev.h>
+ #include <linux/pinctrl/consumer.h>
+ 
+@@ -37,7 +40,8 @@
+ 
+ #define OV13850_LINK_FREQ_300MHZ	300000000
+ /* pixel rate = link frequency * 2 * lanes / BITS_PER_SAMPLE */
+-#define OV13850_PIXEL_RATE		(OV13850_LINK_FREQ_300MHZ * 2 * 2 / 10)
++#define OV13850_PIXEL_RATE		(OV13850_LINK_FREQ_300MHZ * 2ULL * \
++					 OV13850_LANES / OV13850_BITS_PER_SAMPLE)
+ #define OV13850_XVCLK_FREQ		24000000
+ 
+ #define CHIP_ID				0x00d850
+@@ -85,8 +89,6 @@
+ #define OF_CAMERA_PINCTRL_STATE_SLEEP	"rockchip,camera_sleep"
+ 
+ #define OV13850_NAME			"ov13850"
+-
+-static const struct regval *ov13850_global_regs;
+ 
+ static const char * const ov13850_supply_names[] = {
+ 	"avdd",		/* Analog power */
+@@ -136,6 +138,8 @@
+ 	bool			streaming;
+ 	bool			power_on;
+ 	const struct ov13850_mode *cur_mode;
++	const struct regval	*global_regs;
++	struct v4l2_mbus_config_mipi_csi2 csi2;
+ 	u32			module_index;
+ 	const char		*module_facing;
+ 	const char		*module_name;
+@@ -1084,7 +1088,7 @@
+ 			goto unlock_and_return;
+ 		}
+ 
+-		ret = ov13850_write_array(ov13850->client, ov13850_global_regs);
++		ret = ov13850_write_array(ov13850->client, ov13850->global_regs);
+ 		if (ret) {
+ 			v4l2_err(sd, "could not set init registers\n");
+ 			pm_runtime_put_noidle(&client->dev);
+@@ -1115,7 +1119,7 @@
+ 	u32 delay_us;
+ 	struct device *dev = &ov13850->client->dev;
+ 
+-	if (!IS_ERR(ov13850->power_gpio))
++	if (ov13850->power_gpio)
+ 		gpiod_set_value_cansleep(ov13850->power_gpio, 1);
+ 
+ 	usleep_range(1000, 2000);
+@@ -1134,9 +1138,9 @@
+ 	ret = clk_prepare_enable(ov13850->xvclk);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to enable xvclk\n");
+-		return ret;
+-	}
+-	if (!IS_ERR(ov13850->reset_gpio))
++		goto disable_power;
++	}
++	if (ov13850->reset_gpio)
+ 		gpiod_set_value_cansleep(ov13850->reset_gpio, 0);
+ 
+ 	ret = regulator_bulk_enable(OV13850_NUM_SUPPLIES, ov13850->supplies);
+@@ -1145,11 +1149,11 @@
+ 		goto disable_clk;
+ 	}
+ 
+-	if (!IS_ERR(ov13850->reset_gpio))
++	if (ov13850->reset_gpio)
+ 		gpiod_set_value_cansleep(ov13850->reset_gpio, 1);
+ 
+ 	usleep_range(500, 1000);
+-	if (!IS_ERR(ov13850->pwdn_gpio))
++	if (ov13850->pwdn_gpio)
+ 		gpiod_set_value_cansleep(ov13850->pwdn_gpio, 1);
+ 
+ 	/* 8192 cycles prior to first SCCB transaction */
+@@ -1160,6 +1164,9 @@
+ 
+ disable_clk:
+ 	clk_disable_unprepare(ov13850->xvclk);
++disable_power:
++	if (ov13850->power_gpio)
++		gpiod_set_value_cansleep(ov13850->power_gpio, 0);
+ 
+ 	return ret;
+ }
+@@ -1169,10 +1176,10 @@
+ 	int ret;
+ 	struct device *dev = &ov13850->client->dev;
+ 
+-	if (!IS_ERR(ov13850->pwdn_gpio))
++	if (ov13850->pwdn_gpio)
+ 		gpiod_set_value_cansleep(ov13850->pwdn_gpio, 0);
+ 	clk_disable_unprepare(ov13850->xvclk);
+-	if (!IS_ERR(ov13850->reset_gpio))
++	if (ov13850->reset_gpio)
+ 		gpiod_set_value_cansleep(ov13850->reset_gpio, 0);
+ 
+ 	if (!IS_ERR_OR_NULL(ov13850->pins_sleep)) {
+@@ -1181,7 +1188,7 @@
+ 		if (ret < 0)
+ 			dev_dbg(dev, "could not set pins\n");
+ 	}
+-	if (!IS_ERR(ov13850->power_gpio))
++	if (ov13850->power_gpio)
+ 		gpiod_set_value_cansleep(ov13850->power_gpio, 0);
+ 
+ 	regulator_bulk_disable(OV13850_NUM_SUPPLIES, ov13850->supplies);
+@@ -1246,8 +1253,10 @@
+ static int ov13850_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
+ 				struct v4l2_mbus_config *config)
+ {
++	struct ov13850 *ov13850 = to_ov13850(sd);
++
+ 	config->type = V4L2_MBUS_CSI2_DPHY;
+-	config->bus.mipi_csi2.num_data_lanes = OV13850_LANES;
++	config->bus.mipi_csi2 = ov13850->csi2;
+ 
+ 	return 0;
+ }
+@@ -1435,8 +1444,10 @@
+ 
+ 	ret = ov13850_read_reg(client, OV13850_REG_CHIP_ID,
+ 			       OV13850_REG_VALUE_16BIT, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to read chip ID\n");
+ 	if (id != CHIP_ID) {
+-		dev_err(dev, "Unexpected sensor id(%06x), ret(%d)\n", id, ret);
++		dev_err(dev, "Unexpected sensor ID 0x%06x\n", id);
+ 		return -ENODEV;
+ 	}
+ 
+@@ -1448,9 +1459,9 @@
+ 	}
+ 
+ 	if (id == OV13850_R2A)
+-		ov13850_global_regs = ov13850_global_regs_r2a;
++		ov13850->global_regs = ov13850_global_regs_r2a;
+ 	else
+-		ov13850_global_regs = ov13850_global_regs_r1a;
++		ov13850->global_regs = ov13850_global_regs_r1a;
+ 	dev_info(dev, "Detected OV%06x sensor, REVISION 0x%x\n", CHIP_ID, id);
+ 
+ 	return 0;
+@@ -1466,6 +1477,32 @@
+ 	return devm_regulator_bulk_get(&ov13850->client->dev,
+ 				       OV13850_NUM_SUPPLIES,
+ 				       ov13850->supplies);
++}
++
++static int ov13850_parse_endpoint(struct device *dev, struct ov13850 *sensor)
++{
++	struct v4l2_fwnode_endpoint cfg = {
++		.bus_type = V4L2_MBUS_CSI2_DPHY,
++	};
++	struct fwnode_handle *endpoint;
++	int ret;
++
++	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
++	if (!endpoint)
++		return dev_err_probe(dev, -EINVAL, "Missing CSI-2 endpoint\n");
++
++	ret = v4l2_fwnode_endpoint_parse(endpoint, &cfg);
++	fwnode_handle_put(endpoint);
++	if (ret)
++		return dev_err_probe(dev, ret, "Invalid CSI-2 endpoint\n");
++
++	if (cfg.bus.mipi_csi2.num_data_lanes < OV13850_LANES)
++		return dev_err_probe(dev, -EINVAL, "OV13850 requires two routed CSI-2 lanes\n");
++
++	/* The ATK board routes four lanes. The stock register tables enable two. */
++	sensor->csi2 = cfg.bus.mipi_csi2;
++	sensor->csi2.num_data_lanes = OV13850_LANES;
++	return 0;
+ }
+ 
+ static int ov13850_probe(struct i2c_client *client,
+@@ -1503,23 +1540,31 @@
+ 	ov13850->client = client;
+ 	ov13850->cur_mode = &supported_modes[0];
+ 
++	ret = ov13850_parse_endpoint(dev, ov13850);
++	if (ret)
++		return ret;
++
+ 	ov13850->xvclk = devm_clk_get(dev, "xvclk");
+-	if (IS_ERR(ov13850->xvclk)) {
+-		dev_err(dev, "Failed to get xvclk\n");
+-		return -EINVAL;
+-	}
+-
+-	ov13850->power_gpio = devm_gpiod_get(dev, "power", GPIOD_OUT_LOW);
++	if (IS_ERR(ov13850->xvclk))
++		return dev_err_probe(dev, PTR_ERR(ov13850->xvclk), "Failed to get xvclk\n");
++
++	ov13850->power_gpio = devm_gpiod_get_optional(dev, "power",
++							  GPIOD_OUT_LOW);
+ 	if (IS_ERR(ov13850->power_gpio))
+-		dev_warn(dev, "Failed to get power-gpios, maybe no use\n");
+-
+-	ov13850->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++		return dev_err_probe(dev, PTR_ERR(ov13850->power_gpio),
++				     "Failed to get power GPIO\n");
++
++	ov13850->reset_gpio = devm_gpiod_get_optional(dev, "reset",
++							  GPIOD_OUT_LOW);
+ 	if (IS_ERR(ov13850->reset_gpio))
+-		dev_warn(dev, "Failed to get reset-gpios\n");
+-
+-	ov13850->pwdn_gpio = devm_gpiod_get(dev, "pwdn", GPIOD_OUT_LOW);
++		return dev_err_probe(dev, PTR_ERR(ov13850->reset_gpio),
++				     "Failed to get reset GPIO\n");
++
++	ov13850->pwdn_gpio = devm_gpiod_get_optional(dev, "pwdn",
++							  GPIOD_OUT_LOW);
+ 	if (IS_ERR(ov13850->pwdn_gpio))
+-		dev_warn(dev, "Failed to get pwdn-gpios\n");
++		return dev_err_probe(dev, PTR_ERR(ov13850->pwdn_gpio),
++				     "Failed to get pwdn GPIO\n");
+ 
+ 	ret = ov13850_configure_regulators(ov13850);
+ 	if (ret) {
+@@ -1528,6 +1573,8 @@
+ 	}
+ 
+ 	ov13850->pinctrl = devm_pinctrl_get(dev);
++	if (PTR_ERR_OR_ZERO(ov13850->pinctrl) == -EPROBE_DEFER)
++		return -EPROBE_DEFER;
+ 	if (!IS_ERR(ov13850->pinctrl)) {
+ 		ov13850->pins_default =
+ 			pinctrl_lookup_state(ov13850->pinctrl,
+@@ -1539,7 +1586,7 @@
+ 			pinctrl_lookup_state(ov13850->pinctrl,
+ 					     OF_CAMERA_PINCTRL_STATE_SLEEP);
+ 		if (IS_ERR(ov13850->pins_sleep))
+-			dev_err(dev, "could not get sleep pinstate\n");
++			dev_dbg(dev, "No camera sleep pinctrl state\n");
+ 	}
+ 
+ 	mutex_init(&ov13850->mutex);
+@@ -1588,6 +1635,8 @@
+ 	pm_runtime_set_active(dev);
+ 	pm_runtime_enable(dev);
+ 	pm_runtime_idle(dev);
++	dev_info(dev, "ATK OV13850: %u active CSI-2 lanes, V4L2 subdev ready\n",
++		 ov13850->csi2.num_data_lanes);
+ 
+ 	return 0;
+ 
+@@ -1628,7 +1677,9 @@
+ 	{ .compatible = "ovti,ov13850" },
+ 	{},
+ };
++#ifndef OV13850_ATK_EXTERNAL
+ MODULE_DEVICE_TABLE(of, ov13850_of_match);
++#endif
+ #endif
+ 
+ static const struct i2c_device_id ov13850_match_id[] = {
+@@ -1638,7 +1689,11 @@
+ 
+ static struct i2c_driver ov13850_i2c_driver = {
+ 	.driver = {
++#ifdef OV13850_ATK_EXTERNAL
++		.name = "ov13850-atk",
++#else
+ 		.name = OV13850_NAME,
++#endif
+ 		.pm = &ov13850_pm_ops,
+ 		.of_match_table = of_match_ptr(ov13850_of_match),
+ 	},

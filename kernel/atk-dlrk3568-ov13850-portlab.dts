@@ -1,0 +1,13 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    fragment@0 {
+        /* Captured from the live ATK-DLRK3568 board running Linux 6.1.141. */
+        target-path = "/i2c@fe5d0000/ov13850@10";
+
+        __overlay__ {
+            compatible = "ovti,ov13850-portlab";
+        };
+    };
+};

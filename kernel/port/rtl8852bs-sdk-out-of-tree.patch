@@ -1,0 +1,12 @@
+diff --git a/drivers/net/wireless/realtek/rtl8852bs/Makefile b/drivers/net/wireless/realtek/rtl8852bs/Makefile
+--- a/drivers/net/wireless/realtek/rtl8852bs/Makefile
++++ b/drivers/net/wireless/realtek/rtl8852bs/Makefile
+@@ -796,7 +796,7 @@ endif
+ 
+ ########### PLATFORM OPS  ##########################
+ # Import platform assigned KSRC and CROSS_COMPILE
+-include $(wildcard $(DRV_PATH)/platform/*.mk)
++include $(wildcard $(or $(kbuild-dir),$(DRV_PATH))/platform/*.mk)
+ 
+ # Import platform specific compile options
+ EXTRA_CFLAGS += -I$(src)/platform
