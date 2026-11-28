@@ -21,19 +21,28 @@
 namespace robot {
 namespace {
 
-int xioctl(int fd, unsigned long request, void* argument) {
-    int result;
-    do { result = ::ioctl(fd, request, argument); } while (result < 0 && errno == EINTR);
-    return result;
-}
+    // 这个代码通过调用 ioctl 系统调用来与 V4L2（Video for Linux 2）设备进行交互。ioctl 是一个通用的系统调用，用于设备控制和配置。它允许用户空间程序向内核发送各种命令，以便对设备进行操作。
+    // 只有当 ioctl 调用返回值小于 0 且 errno 被设置为 EINTR（表示调用被中断）时，才会继续尝试调用 ioctl。否则，函数将返回 ioctl 的结果。
+    int xioctl(int fd, unsigned long request, void* argument) {
+        int result;
+        do { result = ::ioctl(fd, request, argument); } while (result < 0 && errno == EINTR);
+        return result;
+    }
 
-void check(int result, const std::string& operation) {
-    if (result < 0) throw std::system_error(errno, std::generic_category(), operation);
-}
+    void check(int result, const std::string& operation) {
+        /*
+            真正的失败原因会被系统悄悄存进一个叫 errno 的整数里
+            std::generic_category()就是告诉 C++：“请拿标准的 POSIX / Linux errno 字典来翻译第 1 个数字！(errno)”
+            operation —— 你自己贴的前缀说明 比如 "VIDIOC_STREAMON"。
+        */ 
+        if (result < 0) throw std::system_error(errno, std::generic_category(), operation);
+    }
 
 std::string resolve_device(const std::string& device) {
+    // 如果用户在配置文件里明确指定了 video_device，就直接返回这个值。
     if (device != "auto") return device;
     namespace fs = std::filesystem;
+    // 这里是定义了一个root 内容为路径
     const fs::path root("/sys/class/video4linux");
     std::vector<std::string> matches;
     if (fs::exists(root)) {
@@ -81,9 +90,11 @@ struct BufferRequest {
 
 }  // namespace
 
+// 可以在在《头文件》里面看到 State 是 Capture 的一个私有结构体。
 struct Capture::State {
     std::string path;
     UniqueFd fd;
+    // 保存 V4L2 缓冲区类型枚举：默认先填单平面，构造时检测到 RK3568 ISP 支持多平面后会改成
     v4l2_buf_type type{V4L2_BUF_TYPE_VIDEO_CAPTURE};
     CaptureFormat format{};
     std::unique_ptr<Mapping[]> maps;
@@ -112,13 +123,24 @@ struct Capture::State {
         ~Lease() { owner->requeue(index); }
     };
 };
-
+/*
+    打开摄像头
+    
+    第一个Capture为类名，第二个Capture为构造函数名
+    我们在创建创建摄像头采集对象时，必须告诉它两件事：
+    1. 摄像头的配置参数（Config），包括分辨率、帧率、缓冲区数量等。
+    2. 是否需要导出DMA-BUF零拷贝句柄
+    中间这个冒号 : 是 C++ 构造函数专属语法！ 意思是：“在正式进入后面的 { ... } 函数体干活之前，先把成员变量 state_ 初始化好！”
+    */  
 Capture::Capture(const Config& config, bool export_dma) : state_(std::make_shared<State>()) {
     auto& state = *state_;
     state.path = resolve_device(config.video_device);
     state.fd.reset(::open(state.path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC));
     const auto fd = state.fd.get();
     check(fd, "open " + state.path);
+    /*
+        VIDIOC_QUERYCAP 查设备能力
+    */
     v4l2_capability caps{};
     check(xioctl(fd, VIDIOC_QUERYCAP, &caps), "VIDIOC_QUERYCAP");
     const auto flags = caps.capabilities & V4L2_CAP_DEVICE_CAPS ? caps.device_caps : caps.capabilities;
@@ -129,7 +151,9 @@ Capture::Capture(const Config& config, bool export_dma) : state_(std::make_share
     state.type = mp ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
     auto& actual = state.format;
     actual.multiplanar = mp;
-
+    /*
+        VIDIOC_S_FMT 协商 NV12 格式与色彩空间
+    */
     v4l2_format fmt{};
     fmt.type = state.type;
     if (mp) {
@@ -145,7 +169,9 @@ Capture::Capture(const Config& config, bool export_dma) : state_(std::make_share
         fmt.fmt.pix.field = V4L2_FIELD_NONE;
     }
     check(xioctl(fd, VIDIOC_S_FMT, &fmt), "VIDIOC_S_FMT NV12");
-
+    /*
+        读回驱动真正给的参数并严密校验
+    */
     const auto fourcc = mp ? fmt.fmt.pix_mp.pixelformat : fmt.fmt.pix.pixelformat;
     const auto width = mp ? fmt.fmt.pix_mp.width : fmt.fmt.pix.width;
     const auto height = mp ? fmt.fmt.pix_mp.height : fmt.fmt.pix.height;
@@ -164,7 +190,10 @@ Capture::Capture(const Config& config, bool export_dma) : state_(std::make_share
     state.y_bytes = static_cast<std::size_t>(stride) * height;
     state.image_bytes = state.y_bytes + state.y_bytes / 2;
     if (state.image_bytes > size) throw std::runtime_error("V4L2 sizeimage is too small for NV12");
-
+    /*
+        识别色彩标准与量化范围
+        把 NV12（YUV）转成给 YOLO 模型吃的 RGB 时，不同视频标准的数学公式系数不一样，选错了画面会发灰或偏色！
+    */
     const unsigned colorspace = mp ? fmt.fmt.pix_mp.colorspace : fmt.fmt.pix.colorspace;
     const unsigned encoding = mp ? fmt.fmt.pix_mp.ycbcr_enc : fmt.fmt.pix.ycbcr_enc;
     const unsigned quantization = mp ? fmt.fmt.pix_mp.quantization : fmt.fmt.pix.quantization;
@@ -173,6 +202,9 @@ Capture::Capture(const Config& config, bool export_dma) : state_(std::make_share
     state.full_range = quantization == V4L2_QUANTIZATION_FULL_RANGE ||
                        (quantization == V4L2_QUANTIZATION_DEFAULT && colorspace == V4L2_COLORSPACE_JPEG);
 
+    /*
+        设置帧率参数
+    */
     v4l2_streamparm parm{};
     parm.type = state.type;
     parm.parm.capture.timeperframe = {1, static_cast<std::uint32_t>(config.fps)};
@@ -184,7 +216,9 @@ Capture::Capture(const Config& config, bool export_dma) : state_(std::make_share
                            parm.parm.capture.timeperframe.numerator != 0;
     actual.fps_num = actual.fps_confirmed ? parm.parm.capture.timeperframe.denominator : config.fps;
     actual.fps_den = actual.fps_confirmed ? parm.parm.capture.timeperframe.numerator : 1;
-
+    /*
+        VIDIOC_REQBUFS 申请缓冲池 + 缓冲区数量公式推导
+    */
     v4l2_requestbuffers buffers{};
     buffers.type = state.type;
     buffers.memory = V4L2_MEMORY_MMAP;
@@ -198,6 +232,9 @@ Capture::Capture(const Config& config, bool export_dma) : state_(std::make_share
         throw std::runtime_error("insufficient capture buffers for active queues; increase buffers or shrink queues");
     }
     actual.buffers = buffers.count;
+    /*
+        分配 Mapping[] + QUERYBUF + mmap 映射给 CPU
+    */
     state.maps = std::make_unique<Mapping[]>(buffers.count);
     actual.dma_exported = export_dma;
     for (std::uint32_t index = 0; index < buffers.count; ++index) {
@@ -209,7 +246,9 @@ Capture::Capture(const Config& config, bool export_dma) : state_(std::make_share
         const auto offset = mp ? request.plane.m.mem_offset : request.buffer.m.offset;
         map.address = ::mmap(nullptr, map.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
         if (map.address == MAP_FAILED) check(-1, "mmap V4L2 buffer");
-
+    /*
+        VIDIOC_EXPBUF 导出 DMA-BUF + 优雅降级
+    */
         if (actual.dma_exported) {
             v4l2_exportbuffer exported{};
             exported.type = state.type;
@@ -230,7 +269,9 @@ Capture::Capture(const Config& config, bool export_dma) : state_(std::make_share
 // Capture对象的析构函数，负责释放资源，包括关闭文件描述符和取消内存映射。
 const CaptureFormat& Capture::format() const { return state_->format; }
 const std::string& Capture::device() const { return state_->path; }
-
+/*
+    Capture::start() — 全部餐盘入队并开拍
+*/
 void Capture::start() {
     auto& state = *state_;
     for (std::uint32_t index = 0; index < state.format.buffers; ++index) {
@@ -240,7 +281,9 @@ void Capture::start() {
     check(xioctl(state.fd.get(), VIDIOC_STREAMON, &state.type), "VIDIOC_STREAMON");
     state.streaming = true;
 }
-
+/*
+    Capture::next() — 每秒跑 30 次的核心取帧函数
+*/
 FramePtr Capture::next(int timeout_ms) {
     auto& state = *state_;
     const auto previous_error = state.requeue_error.load();
@@ -252,7 +295,9 @@ FramePtr Capture::next(int timeout_ms) {
     if (ready == 0 || (ready < 0 && errno == EINTR)) return {};
     check(ready, "poll V4L2");
     if (!(watched.revents & POLLIN)) throw std::runtime_error("V4L2 poll returned a capture error");
-
+    /*
+        VIDIOC_DQBUF 端走满盘 + 防呆校验
+    */
     BufferRequest request(state.type);
     const int dequeued = xioctl(state.fd.get(), VIDIOC_DQBUF, &request.buffer);
     if (dequeued < 0 && errno == EAGAIN) return {};

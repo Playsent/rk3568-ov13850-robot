@@ -27,6 +27,7 @@ namespace robot {
             知识点：拷贝赋值运算符重载。operator= 重载的是赋值号 =（比如 b = a;）。同样用 = delete 封死。
         */
         UniqueFd& operator=(const UniqueFd&) = delete;
+        
         UniqueFd(UniqueFd&& other) noexcept : fd_(other.release()) {}
         UniqueFd& operator=(UniqueFd&& other) noexcept {
             if (this != &other) reset(other.release());
